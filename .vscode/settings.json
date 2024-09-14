@@ -12,5 +12,8 @@
     ],
     "idf.port": "/dev/ttyS0",
     "idf.pythonBinPath": "/home/john/.espressif/python_env/idf5.4_py3.10_env/bin/python",
-    "idf.toolsPath": "/home/john/.espressif"
+    "idf.toolsPath": "/home/john/.espressif",
+    "files.associations": {
+        "type_traits": "c"
+    }
 }

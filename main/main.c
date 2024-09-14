@@ -27,10 +27,10 @@
 #include "lwip/err.h"
 #include "lwip/sys.h"
 #include <lwip/netdb.h>
-#include "esp_gatt_defs.h"
-#include "esp_gatts_api.h"
-#include "esp_gatt_common_api.h"
-#include "esp_bt_defs.h"
+// #include "esp_gatt_defs.h"
+// #include "esp_gatts_api.h"
+// #include "esp_gatt_common_api.h"
+// #include "esp_bt_defs.h"
 
 
 static const char *TAG = "esp32_John";
@@ -46,7 +46,7 @@ static const char *TAGTCPCLI = "TCP_client";
 //default values
 char ssid[MAX_SSID_LENGTH] = "defaultSSID";
 char password[MAX_PASSWORD_LENGTH] = "defaultPassword";
-char port[MAX_PORT_LENGTH] = "80";
+char PORT[MAX_PORT_LENGTH] = "80";
 char ip[MAX_IP_LENGTH] = "0000.0000.0000.0000";
 
 
@@ -104,52 +104,6 @@ char *TAGBLE = "BLE-Server";
 uint8_t ble_addr_type;
 void ble_app_advertise(void);
 
-
-// GATT Service and Characteristics
-static const esp_gatts_attr_db_t gatt_db[] = {
-    // Primary Service Declaration
-    [0] = {{ESP_GATT_AUTO_RSP},
-           {ESP_UUID_LEN_16,
-            ESP_GATT_PERM_READ,
-            ESP_GATT_SIZE_16,
-            ESP_GATT_SIZE_16,
-            (uint8_t *)&SERVICE_UUID},
-           ESP_GATT_SERVICE_UUID},
-    // SSID Characteristic Declaration
-    [1] = {{ESP_GATT_AUTO_RSP},
-           {ESP_UUID_LEN_16,
-            ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-            ESP_GATT_SIZE_16,
-            ESP_GATT_SIZE_MAX,
-            NULL},
-           ESP_GATT_CHAR_UUID},
-    // SSID Characteristic Value
-    [2] = {{ESP_GATT_AUTO_RSP},
-           {ESP_UUID_LEN_16,
-            ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-            ESP_GATT_SIZE_MAX,
-            ESP_GATT_SIZE_MAX,
-            NULL},
-           ESP_GATT_CHAR_VALUE_UUID},
-    // Password Characteristic Declaration
-    [3] = {{ESP_GATT_AUTO_RSP},
-           {ESP_UUID_LEN_16,
-            ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-            ESP_GATT_SIZE_16,
-            ESP_GATT_SIZE_MAX,
-            NULL},
-           ESP_GATT_CHAR_UUID},
-    // Password Characteristic Value
-    [4] = {{ESP_GATT_AUTO_RSP},
-           {ESP_UUID_LEN_16,
-            ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-            ESP_GATT_SIZE_MAX,
-            ESP_GATT_SIZE_MAX,
-            NULL},
-           ESP_GATT_CHAR_VALUE_UUID},
-};
-
-
 static int ssid_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) 
 {
     if (ctxt->om->om_len > sizeof(ssid)) {
@@ -182,7 +136,7 @@ static int password_write(uint16_t conn_handle, uint16_t attr_handle, struct ble
 
 static int port_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) 
 {
-    if (ctxt->om->om_len > sizeof(port)) {
+    if (ctxt->om->om_len > sizeof(PORT)) {
         ESP_LOGE(TAG, "Port too long: %d", ctxt->om->om_len);
         return -1;
     }else if (ctxt->om->om_len == 0) {
@@ -191,7 +145,7 @@ static int port_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gat
     }
     
     printf("Port received: %s\n", (char*)ctxt->om->om_data);
-    strncpy(port, (char*)ctxt->om->om_data, sizeof(port));
+    strncpy(PORT, (char*)ctxt->om->om_data, sizeof(PORT));
 
     return 0;
 }
@@ -256,8 +210,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI("GAP", "BLE GAP EVENT DISCONNECTED");
-        // Annonsera igen efter frånkoppling
-        ble_app_advertise();
+        ble_app_advertise();    //if failed, advertise 
         break;
     case BLE_GAP_EVENT_ADV_COMPLETE:
         ESP_LOGI("GAP", "BLE GAP EVENT ADV COMPLETE");
@@ -338,15 +291,14 @@ void configure_adc() {
 
 void read_temperature(void *pvParameters) {
     int adc_raw;
-    adc_oneshot_read(adc1_handle, TMP_SENSOR_PIN, &adc_raw);  // Read raw ADC value
     while (1) {
-        float temperature = read_temperature();
+        adc_oneshot_read(adc1_handle, TMP_SENSOR_PIN, &adc_raw);  // Read raw ADC value
+        float temperature = adc_raw;
         float temp= (temperature/3312*100);
         ESP_LOGI(TAG, "Temperature: %.2f °C", temp);  // Print the raw value, convert as needed
         vTaskDelay(pdMS_TO_TICKS(1000));  // Delay for 1 second
     }
 }
-
 
 // TCP-server
 void tcpserver(void *pvParameters)
