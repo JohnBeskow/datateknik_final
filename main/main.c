@@ -60,8 +60,6 @@ void strcpy_safe(char *output, const char *pSrc, size_t output_size)
 }
 /////////////////////////////////////////////////////////////////////
 
-
-
 // fan GPIO
 #define FAN_GPIO GPIO_NUM_23
 
@@ -95,22 +93,21 @@ void configure_adc() {
 }
 
 
-// TCP-klient
+// TCP client task
 void tcpclient(void *pvParameters)
 {
-    char rxbuffer[20];  //buffer recieve
-    char txbuffer[20];  // Buffer send
-
+    char rxbuffer[20];  // Buffer for receiving data
+    char txbuffer[20];  // Buffer for sending data
 
     int tcpport = atoi(PORT);
 
     struct sockaddr_in dest_addr;
     dest_addr.sin_addr.s_addr = inet_addr(IP); // Server IP
     dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(tcpport); // Server port
+    dest_addr.sin_port = htons(tcpport);       // Server port
 
     int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock != 0)
+    if (sock < 0)  // Use < 0 instead of != 0 to check for error
     {
         ESP_LOGE(TAGTCPCLI, "Error when creating socket: errno %d", errno);
         vTaskDelete(NULL);
@@ -118,7 +115,7 @@ void tcpclient(void *pvParameters)
     ESP_LOGI(TAGTCPCLI, "Socket created");
 
     int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-    if (err!= 0)
+    if (err != 0)
     {
         ESP_LOGE(TAGTCPCLI, "Error when connecting to socket: errno %d", errno);
         close(sock);
@@ -127,15 +124,13 @@ void tcpclient(void *pvParameters)
     ESP_LOGI(TAGTCPCLI, "Successfully connected");
     ESP_LOGI(TAGTCPCLI, "Connected to server: %s:%d", IP, tcpport);
 
-    struct sockaddr_storage source_addr;
-    socklen_t socklen = sizeof(source_addr);
-
     while (1)
-    { 
+    {
         int adc_raw;
         adc_oneshot_read(adc1_handle, TMP_SENSOR_PIN, &adc_raw);  // Read raw ADC value
-        float temperature = (adc_raw / 3312.0) * 100.0;  // Convert raw ADC value to temperature
+        float temperature = (adc_raw / 3312.0) * 100.0;           // Convert raw ADC value to temperature
         snprintf(txbuffer, sizeof(txbuffer), "%.2f\n", temperature);  // Format temperature as string
+        ESP_LOGI(TAGTCPCLI, "Sending temperature: %.2f°C", temperature);
 
         // Send temperature data to the server
         err = send(sock, txbuffer, strlen(txbuffer), 0);
@@ -146,31 +141,45 @@ void tcpclient(void *pvParameters)
         }
 
         // Wait for server response ('1' or '0')
-        int len = recvfrom(sock, rxbuffer, sizeof(rxbuffer), 0, (struct sockaddr*)&source_addr, &socklen);
+        int len = recv(sock, rxbuffer, sizeof(rxbuffer) - 1, 0);  // Use recv for TCP
         if (len < 0)
         {
             ESP_LOGE(TAGTCPCLI, "Error occurred during receiving: errno %d", errno);
             break;
         }
 
+        rxbuffer[len] = '\0';  // Null-terminate received data
+        ESP_LOGI(TAGTCPCLI, "Server response: %s", rxbuffer);
+
         // Check the response
         if (rxbuffer[0] == '1')
         {
-            ESP_LOGI(TAGTCPCLI, "Server response: Temperature > 50. Turning fan ON.");
-            fan_on();  
+            int fan = check_fan(); 
+            if (fan == 1)
+            {
+                ESP_LOGI(TAGTCPCLI, "Temperature > 50. Fan is already ON.");
+            }
+            else
+            {
+                ESP_LOGI(TAGTCPCLI, "Temperature > 50. Turning fan ON.");
+                fan_on();
+            }
         }
         else if (rxbuffer[0] == '0')
         {
-            ESP_LOGI(TAGTCPCLI, "Server response: Temperature <= 50. Turning fan OFF.");
+            ESP_LOGI(TAGTCPCLI, "Temperature <= 50. Turning fan OFF.");
             fan_off();
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(1000));  // Delay for 1 second
     }
 
     close(sock);
     vTaskDelete(NULL);
 }
+
+
+
 
 static EventGroupHandle_t wifi_event_group;
 const int CONNECTED_BIT = BIT0;
