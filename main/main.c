@@ -39,13 +39,13 @@ static const char *TAGTCPCLI = "TCP_client";
 #define MAX_IP_LENGTH 20
 
 //default values
-char SSID[MAX_SSID_LENGTH] = "DEFAULT";        //Tele2_acb9ed
-char PASSWORD[MAX_PASSWORD_LENGTH] = "DEFAULT";    //fdzqmnhd
-char PORT[MAX_PORT_LENGTH] = "1256";
-char IP[MAX_IP_LENGTH] = "192.168.0.49";
+char SSID[MAX_SSID_LENGTH] = "DEFAULT";
+char PASSWORD[MAX_PASSWORD_LENGTH] = "DEFAULT";
+char PORT[MAX_PORT_LENGTH] = "DEFAULt";
+char IP[MAX_IP_LENGTH] = "DEFAULT";
 
 
-
+//funktion to test if strncpy doesnt work
 //////////////////////////////////////////////////////////////////
 void strcpy_safe(char *output, const char *pSrc, size_t output_size)
 {
@@ -60,54 +60,6 @@ void strcpy_safe(char *output, const char *pSrc, size_t output_size)
 }
 /////////////////////////////////////////////////////////////////////
 
-
-static EventGroupHandle_t wifi_event_group;
-const int CONNECTED_BIT = BIT0;
-
-static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        esp_wifi_connect();
-        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-    }
-}
-
-
-// Initialize Wi-Fi
-void wifi_init_sta(void) {
-    esp_netif_init();
-    wifi_event_group = xEventGroupCreate();
-    esp_event_loop_create_default();
-    esp_netif_create_default_wifi_sta();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id);
-    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip);
-
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = {0},
-            .password = {0},
-        },
-    };
-    strncpy((char*)wifi_config.sta.ssid, SSID, sizeof(wifi_config.sta.ssid));
-    strncpy((char*)wifi_config.sta.password, PASSWORD, sizeof(wifi_config.sta.password));
-
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config);
-    esp_wifi_start();
-    
-    ESP_LOGI(TAG, "Wi-Fi reinitialized with new credentials.");
-}
 
 
 // fan GPIO
@@ -141,6 +93,7 @@ void configure_adc() {
     };
     adc_oneshot_config_channel(adc1_handle, TMP_SENSOR_PIN, &config);  // Configure the channel
 }
+
 
 // TCP-klient
 void tcpclient(void *pvParameters)
@@ -218,6 +171,59 @@ void tcpclient(void *pvParameters)
     close(sock);
     vTaskDelete(NULL);
 }
+
+static EventGroupHandle_t wifi_event_group;
+const int CONNECTED_BIT = BIT0;
+
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();  // Start Wi-Fi connection
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        esp_wifi_connect();  // Reconnect on disconnect
+        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+
+        // Start the TCP client after getting IP
+        ESP_LOGI(TAG, "Starting TCP client...");
+        xTaskCreate(tcpclient, "tcp_client", 10096, NULL, 5, NULL);
+    }
+}
+
+
+// Initialize Wi-Fi
+void wifi_init_sta(void) {
+    esp_netif_init();
+    wifi_event_group = xEventGroupCreate();
+    esp_event_loop_create_default();
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id);
+    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip);
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = {0},
+            .password = {0},
+        },
+    };
+    strncpy((char*)wifi_config.sta.ssid, SSID, sizeof(wifi_config.sta.ssid));
+    strncpy((char*)wifi_config.sta.password, PASSWORD, sizeof(wifi_config.sta.password));
+
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config);
+    esp_wifi_start();
+
+    ESP_LOGI(TAG, "Wi-Fi reinitialized with new credentials.");
+}
+
 
 char *TAGBLE = "BLE-Server";
 uint8_t ble_addr_type;
