@@ -62,16 +62,35 @@ void strcpy_safe(char *output, const char *pSrc, size_t output_size)
 
 // fan GPIO
 #define FAN_GPIO GPIO_NUM_23
+bool level; //default
 
 // fan on/off
 void fan_on()
 {
+    gpio_reset_pin(FAN_GPIO);
+    gpio_set_direction(FAN_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_level(FAN_GPIO, 1);
+    level = 1;
 }
 
 void fan_off()
 {
+    gpio_reset_pin(FAN_GPIO);
+    gpio_set_direction(FAN_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_level(FAN_GPIO, 0);
+    level = 0;
+}
+
+int check_fan()
+{
+    if (level == 1)
+    {
+        return 1;
+    }
+    else
+    {
+        return 0;
+    }
 }
 
 // Configure the Potentiometer
@@ -113,6 +132,18 @@ void tcpclient(void *pvParameters)
         vTaskDelete(NULL);
     }
     ESP_LOGI(TAGTCPCLI, "Socket created");
+
+    //socket timeouts
+    struct timeval timeout;
+    timeout.tv_sec = 10;  // 10-second timeout for send/recv operations
+    timeout.tv_usec = 0;  // Microseconds (set to 0)
+
+    //timeout for socket recieve
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    //timeout for socket send
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
 
     int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
     if (err != 0)
@@ -167,8 +198,16 @@ void tcpclient(void *pvParameters)
         }
         else if (rxbuffer[0] == '0')
         {
-            ESP_LOGI(TAGTCPCLI, "Temperature <= 50. Turning fan OFF.");
-            fan_off();
+            int fan = check_fan(); 
+            if (fan == 0)
+            {
+                ESP_LOGI(TAGTCPCLI, "Temperature <= 50. Fan is already OFF.");
+            }
+            else
+            {
+                ESP_LOGI(TAGTCPCLI, "Temperature <= 50. Turning fan OFF.");
+                fan_off();
+            } 
         }
 
         vTaskDelay(pdMS_TO_TICKS(1000));  // Delay for 1 second
