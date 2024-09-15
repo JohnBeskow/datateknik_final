@@ -30,20 +30,35 @@
 
 
 static const char *TAG = "esp32_John";
-static const char *TAGTCPSERV = "TCP_server";
 static const char *TAGTCPCLI = "TCP_client";
 
 
-#define MAX_SSID_LENGTH 32
-#define MAX_PASSWORD_LENGTH 64
-#define MAX_PORT_LENGTH 5
-#define MAX_IP_LENGTH 15
+#define MAX_SSID_LENGTH 40
+#define MAX_PASSWORD_LENGTH 32
+#define MAX_PORT_LENGTH 10
+#define MAX_IP_LENGTH 20
 
 //default values
-char SSID[MAX_SSID_LENGTH] = "defaultSSID";
-char PASSWORD[MAX_PASSWORD_LENGTH] = "defaultPassword";
-char PORT[MAX_PORT_LENGTH] = "80";
-char IP[MAX_IP_LENGTH] = "0000.0000.0000.0000";
+char SSID[MAX_SSID_LENGTH] = "DEFAULT";        //Tele2_acb9ed
+char PASSWORD[MAX_PASSWORD_LENGTH] = "DEFAULT";    //fdzqmnhd
+char PORT[MAX_PORT_LENGTH] = "1256";
+char IP[MAX_IP_LENGTH] = "192.168.0.49";
+
+
+
+//////////////////////////////////////////////////////////////////
+void strcpy_safe(char *output, const char *pSrc, size_t output_size)
+{
+    // Ensure only allowed characters
+    size_t copyLength = strlen(pSrc) < (output_size - 1) ? strlen(pSrc) : (output_size - 1);
+
+    // copy string
+    memcpy(output, pSrc, copyLength);
+
+    // make sure \0
+    output[copyLength] = '\0';
+}
+/////////////////////////////////////////////////////////////////////
 
 
 static EventGroupHandle_t wifi_event_group;
@@ -94,77 +109,204 @@ void wifi_init_sta(void) {
     ESP_LOGI(TAG, "Wi-Fi reinitialized with new credentials.");
 }
 
+
+// fan GPIO
+#define FAN_GPIO GPIO_NUM_23
+
+// fan on/off
+void fan_on()
+{
+    gpio_set_level(FAN_GPIO, 1);
+}
+
+void fan_off()
+{
+    gpio_set_level(FAN_GPIO, 0);
+}
+
+// Configure the Potentiometer
+#define TMP_SENSOR_PIN ADC_CHANNEL_3  // Corresponds to GPIO3 (ADC1_CHANNEL_3)
+
+static adc_oneshot_unit_handle_t adc1_handle;
+
+void configure_adc() {
+    adc_oneshot_unit_init_cfg_t init_config = {
+        .unit_id = ADC_UNIT_1,
+    };
+    adc_oneshot_new_unit(&init_config, &adc1_handle);
+
+    adc_oneshot_chan_cfg_t config = {
+        .atten = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_12,  // Set 12-bit resolution
+    };
+    adc_oneshot_config_channel(adc1_handle, TMP_SENSOR_PIN, &config);  // Configure the channel
+}
+
+// TCP-klient
+void tcpclient(void *pvParameters)
+{
+    char rxbuffer[20];  //buffer recieve
+    char txbuffer[20];  // Buffer send
+
+
+    int tcpport = atoi(PORT);
+
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_addr.s_addr = inet_addr(IP); // Server IP
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(tcpport); // Server port
+
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock != 0)
+    {
+        ESP_LOGE(TAGTCPCLI, "Error when creating socket: errno %d", errno);
+        vTaskDelete(NULL);
+    }
+    ESP_LOGI(TAGTCPCLI, "Socket created");
+
+    int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (err!= 0)
+    {
+        ESP_LOGE(TAGTCPCLI, "Error when connecting to socket: errno %d", errno);
+        close(sock);
+        vTaskDelete(NULL);
+    }
+    ESP_LOGI(TAGTCPCLI, "Successfully connected");
+    ESP_LOGI(TAGTCPCLI, "Connected to server: %s:%d", IP, tcpport);
+
+    struct sockaddr_storage source_addr;
+    socklen_t socklen = sizeof(source_addr);
+
+    while (1)
+    { 
+        int adc_raw;
+        adc_oneshot_read(adc1_handle, TMP_SENSOR_PIN, &adc_raw);  // Read raw ADC value
+        float temperature = (adc_raw / 3312.0) * 100.0;  // Convert raw ADC value to temperature
+        snprintf(txbuffer, sizeof(txbuffer), "%.2f\n", temperature);  // Format temperature as string
+
+        // Send temperature data to the server
+        err = send(sock, txbuffer, strlen(txbuffer), 0);
+        if (err < 0)
+        {
+            ESP_LOGE(TAGTCPCLI, "Error occurred during sending: errno %d", errno);
+            break;
+        }
+
+        // Wait for server response ('1' or '0')
+        int len = recvfrom(sock, rxbuffer, sizeof(rxbuffer), 0, (struct sockaddr*)&source_addr, &socklen);
+        if (len < 0)
+        {
+            ESP_LOGE(TAGTCPCLI, "Error occurred during receiving: errno %d", errno);
+            break;
+        }
+
+        // Check the response
+        if (rxbuffer[0] == '1')
+        {
+            ESP_LOGI(TAGTCPCLI, "Server response: Temperature > 50. Turning fan ON.");
+            fan_on();  
+        }
+        else if (rxbuffer[0] == '0')
+        {
+            ESP_LOGI(TAGTCPCLI, "Server response: Temperature <= 50. Turning fan OFF.");
+            fan_off();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    close(sock);
+    vTaskDelete(NULL);
+}
+
 char *TAGBLE = "BLE-Server";
 uint8_t ble_addr_type;
 void ble_app_advertise(void);
 
-// ssid of wifi to connect to 
-static int ssid_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) 
-{
-    if (ctxt->om->om_len > sizeof(SSID)) {
-        ESP_LOGE(TAG, "SSID too long: %d", ctxt->om->om_len);
-        return -1;
-    }else if (ctxt->om->om_len == 0) {
-        ESP_LOGE(TAG, "SSID too short: %d", ctxt->om->om_len);
+// Function to parse the incoming data
+static int parse_received_data(const char *data) {
+    char *token;
+    char buffer[256]; //buffer for parsed data
+    strncpy(buffer, data, sizeof(buffer) - 1);  //save data
+
+    // Tokenize and assign the SSID
+    token = strtok(buffer, ",");
+    if (token != NULL) {
+        strncpy(SSID, token, MAX_SSID_LENGTH - 1);
+        SSID[MAX_SSID_LENGTH - 1] = '\0';
+    } else {
+        ESP_LOGE(TAG, "SSID is missing in the data");
         return -1;
     }
-    
-    ESP_LOGI(TAG, "SSID received: %s", (char*)ctxt->om->om_data);
-    strncpy(SSID, (char*)ctxt->om->om_data, sizeof(SSID));
+
+    // Tokenize and assign the Password
+    token = strtok(NULL, ",");
+    if (token != NULL) {
+        strncpy(PASSWORD, token, MAX_PASSWORD_LENGTH - 1);
+        PASSWORD[MAX_PASSWORD_LENGTH - 1] = '\0';
+    } else {
+        ESP_LOGE(TAG, "Password is missing in the data");
+        return -1;
+    }
+
+    // Tokenize and assign the Port
+    token = strtok(NULL, ",");
+    if (token != NULL) {
+        strncpy(PORT, token, MAX_PORT_LENGTH - 1);
+        PORT[MAX_PORT_LENGTH - 1] = '\0';
+    } else {
+        ESP_LOGE(TAG, "Port is missing in the data");
+        return -1;
+    }
+
+    // Tokenize and assign the IP Address
+    token = strtok(NULL, ",");
+    if (token != NULL) {
+        strncpy(IP, token, MAX_IP_LENGTH - 1);
+        IP[MAX_IP_LENGTH - 1] = '\0';
+    } else {
+        ESP_LOGE(TAG, "IP is missing in the data");
+        return -1;
+    }
+
+    ESP_LOGI(TAG, "Parsed SSID: %s", SSID);
+    ESP_LOGI(TAG, "Parsed Password: %s", PASSWORD);
+    ESP_LOGI(TAG, "Parsed Port: %s", PORT);
+    ESP_LOGI(TAG, "Parsed IP: %s", IP);
 
     return 0;
 }
 
-//password for wifi to connec6t to
-static int password_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) 
-{
-    if (ctxt->om->om_len > sizeof(PASSWORD)) {
-        ESP_LOGE(TAG, "Password too long: %d", ctxt->om->om_len);
-        return -1;
-    }else if (ctxt->om->om_len == 0) {
-        ESP_LOGE(TAG, "Password too short: %d", ctxt->om->om_len);
+// handler for recieving all data
+static int ble_write_handler(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    char received_data[256];
+
+    // Copy the received data to a local buffer 
+    if (ctxt->om->om_len >= sizeof(received_data)) {
+        ESP_LOGE(TAG, "Received data is too long");
         return -1;
     }
-    printf("Password received: %s\n", (char*)ctxt->om->om_data);
-    strncpy(PASSWORD, (char*)ctxt->om->om_data, sizeof(PASSWORD));
+    memcpy(received_data, ctxt->om->om_data, ctxt->om->om_len);
+    received_data[ctxt->om->om_len] = '\0'; //make sure \0
+
+    ESP_LOGI(TAG, "Raw data received: %s", received_data);
+
+    // Parse the received data
+    if (parse_received_data(received_data) != 0) {
+        ESP_LOGE(TAG, "Failed to parse received data");
+        return -1;
+    }
+
+    // id good, start wifi and tcp
+    ESP_LOGI(TAG, "Starting Wi-Fi with received credentials");
     wifi_init_sta();
-    return 0;
-}
 
-// Which port to connect to (send/receive data)
-static int port_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) 
-{
-    if (ctxt->om->om_len > sizeof(PORT)) {
-        ESP_LOGE(TAG, "Port too long: %d", ctxt->om->om_len);
-        return -1;
-    }else if (ctxt->om->om_len == 0) {
-        ESP_LOGE(TAG, "Port too short: %d", ctxt->om->om_len);
-        return -1;
-    }
-    
-    printf("Port received: %s\n", (char*)ctxt->om->om_data);
-    strncpy(PORT, (char*)ctxt->om->om_data, sizeof(PORT));
+    xTaskCreate(tcpclient, "tcp_client", 10096, NULL, 5, NULL);
 
     return 0;
 }
 
-//Go-server ip write
-static int ip_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) 
-{
-    if (ctxt->om->om_len > sizeof(IP)) {
-        ESP_LOGE(TAG, "IP too long: %d", ctxt->om->om_len);
-        return -1;
-    }else if (ctxt->om->om_len == 0) {
-        ESP_LOGE(TAG, "IP too short: %d", ctxt->om->om_len);
-        return -1;
-    }
-    printf("IP received: %s\n", (char*)ctxt->om->om_data);
-    strncpy(IP, (char*)ctxt->om->om_data, sizeof(IP));
-
-    return 0;
-}
-
-// GATT Services Definition
+// GATT Services Definition 
 static const struct ble_gatt_svc_def gatt_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -173,22 +315,7 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
             {
                 .uuid = BLE_UUID16_DECLARE(0xF00D),
                 .flags = BLE_GATT_CHR_F_WRITE,
-                .access_cb = ssid_write,
-            },
-            {
-                .uuid = BLE_UUID16_DECLARE(0xFEED),
-                .flags = BLE_GATT_CHR_F_WRITE,
-                .access_cb = password_write,
-            },
-            {
-                .uuid = BLE_UUID16_DECLARE(0xF567),
-                .flags = BLE_GATT_CHR_F_WRITE,
-                .access_cb = port_write,
-            },
-            {
-                .uuid = BLE_UUID16_DECLARE(0xDEAD),
-                .flags = BLE_GATT_CHR_F_WRITE,
-                .access_cb = ip_write,
+                .access_cb = ble_write_handler, 
             },
             {0}
         },
@@ -205,7 +332,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI("GAP", "BLE GAP EVENT CONNECT %s", event->connect.status == 0 ? "OK!" : "FAILED!");
         if (event->connect.status != 0)
         {
-            ble_app_advertise();
+            ble_app_advertise();    //if failed, advertise
         }
         break;
     case BLE_GAP_EVENT_DISCONNECT:
@@ -214,7 +341,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         break;
     case BLE_GAP_EVENT_ADV_COMPLETE:
         ESP_LOGI("GAP", "BLE GAP EVENT ADV COMPLETE");
-        ble_app_advertise();
+        ble_app_advertise();    //if completed, advertise
         break;
     default:
         break;
@@ -222,7 +349,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     return 0;
 }
 
-// Annonseringskonfiguration
+// advertise config
 void ble_app_advertise(void)
 {
     struct ble_hs_adv_fields fields;
@@ -252,128 +379,9 @@ void host_task(void *param)
     nimble_port_run();
 }
 
-// fan GPIO
-#define FAN_GPIO GPIO_NUM_23
 
-// fan on/off
-void fan_on()
+void Ble_task(void *pvParameters)
 {
-    gpio_set_level(FAN_GPIO, 1);
-}
-
-void fan_off()
-{
-    gpio_set_level(FAN_GPIO, 0);
-}
-
-
-
-static const char *TAG = "adc_example";
-#define TMP_SENSOR_PIN ADC_CHANNEL_3  // Corresponds to GPIO3 (ADC1_CHANNEL_3)
-
-static adc_oneshot_unit_handle_t adc1_handle;
-
-void configure_adc() {
-    adc_oneshot_unit_init_cfg_t init_config = {
-        .unit_id = ADC_UNIT_1,
-    };
-    adc_oneshot_new_unit(&init_config, &adc1_handle);
-
-    adc_oneshot_chan_cfg_t config = {
-        .atten = ADC_ATTEN_DB_11,
-        .bitwidth = ADC_BITWIDTH_12,  // Set 12-bit resolution
-    };
-    adc_oneshot_config_channel(adc1_handle, TMP_SENSOR_PIN, &config);  // Configure the channel
-}
-
-// TCP-klient
-void tcpclient(void *pvParameters)
-{
-    char rxbuffer[20];  //buffer recieve
-    char txbuffer[20];  // Buffer send
-
-    struct sockaddr_in dest_addr;
-    dest_addr.sin_addr.s_addr = inet_addr(IP); // Replace with your server's IP
-    dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(PORT); 
-
-    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock < 0)
-    {
-        ESP_LOGE(TAGTCPCLI, "Error when creating socket: errno %d", errno);
-        vTaskDelete(NULL);
-    }
-
-    int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-    if (err < 0)
-    {
-        ESP_LOGE(TAGTCPCLI, "Error when connecting to socket: errno %d", errno);
-        close(sock);
-        vTaskDelete(NULL);
-    }
-
-    struct sockaddr_storage source_addr;
-    socklen_t socklen = sizeof(source_addr);
-
-    while (1)
-    { 
-        int adc_raw;
-        adc_oneshot_read(adc1_handle, TMP_SENSOR_PIN, &adc_raw);  // Read raw ADC value
-        float temperature = (adc_raw / 3312.0) * 100.0;  // Convert raw ADC value to temperature
-        snprintf(txbuffer, sizeof(txbuffer), "%.2f\n", temperature);  // Format temperature as string
-
-        // Send temperature data to the server
-        err = send(sock, txbuffer, strlen(txbuffer), 0);
-        if (err < 0)
-        {
-            ESP_LOGE(TAGTCPCLI, "Error occurred during sending: errno %d", errno);
-            break;
-        }
-
-        // Wait for server response ('1' or '0')
-        int len = recv(sock, rxbuffer, sizeof(rxbuffer), 0);
-        if (len < 0)
-        {
-            ESP_LOGE(TAGTCPCLI, "Error occurred during receiving: errno %d", errno);
-            break;
-        }
-
-        // Check the response
-        if (rxbuffer[0] == '1')
-        {
-            ESP_LOGI(TAGTCPCLI, "Server response: Temperature > 50. Turning fan ON.");
-            fan_on();  
-        }
-        else if (rxbuffer[0] == '0')
-        {
-            ESP_LOGI(TAGTCPCLI, "Server response: Temperature <= 50. Turning fan OFF.");
-            fan_off();
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-
-    close(sock);
-    vTaskDelete(NULL);
-}
-
-
-void app_main(void)
-{
-    // initiate the adc for the potentiometer
-    configure_adc();
-
-    esp_err_t ret = nvs_flash_init();
-
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
-    wifi_init_sta();
-
-    // Initiera Nimble för BLE
     nimble_port_init();
     ble_svc_gap_device_name_set("BleServer");
     ble_svc_gap_init();
@@ -382,6 +390,23 @@ void app_main(void)
     ble_gatts_add_svcs(gatt_svcs);
     ble_hs_cfg.sync_cb = ble_app_on_sync;
     nimble_port_freertos_init(host_task);
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));  
+    }
+}
 
-    xTaskCreate(tcpclient, "tcp_client", 4096, NULL, 5, NULL);
+void app_main(void)
+{
+    esp_err_t ret = nvs_flash_init();
+
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // initiate the adc for the potentiometer
+    configure_adc();
+
+    xTaskCreate(Ble_task, "Ble_task", 8192, NULL, 5, NULL);
 }
