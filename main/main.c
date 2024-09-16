@@ -98,6 +98,7 @@ int check_fan()
 
 static adc_oneshot_unit_handle_t adc1_handle;
 
+//configure analog to digital 
 void configure_adc() {
     adc_oneshot_unit_init_cfg_t init_config = {
         .unit_id = ADC_UNIT_1,
@@ -106,17 +107,24 @@ void configure_adc() {
 
     adc_oneshot_chan_cfg_t config = {
         .atten = ADC_ATTEN_DB_12,
-        .bitwidth = ADC_BITWIDTH_12,  // Set 12-bit resolution
+        .bitwidth = ADC_BITWIDTH_12,  // Set 12-bit resolution(precise)
     };
-    adc_oneshot_config_channel(adc1_handle, TMP_SENSOR_PIN, &config);  // Configure the channel
+    adc_oneshot_config_channel(adc1_handle, TMP_SENSOR_PIN, &config);  // use the config
 }
-
 
 // TCP client task
 void tcpclient(void *pvParameters)
 {
-    char rxbuffer[20];  // Buffer for receiving data
-    char txbuffer[20];  // Buffer for sending data
+    char rxbuffer[20];
+    char txbuffer[100];
+
+    
+    uint8_t mac_addr[6];
+    esp_read_mac(mac_addr, ESP_MAC_WIFI_STA);  // Read MAC address for Wi-Fi station
+
+    char mac_str[18];
+    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
 
     int tcpport = atoi(PORT);
 
@@ -126,24 +134,20 @@ void tcpclient(void *pvParameters)
     dest_addr.sin_port = htons(tcpport);       // Server port
 
     int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock < 0)  // Use < 0 instead of != 0 to check for error
+    if (sock < 0)
     {
         ESP_LOGE(TAGTCPCLI, "Error when creating socket: errno %d", errno);
         vTaskDelete(NULL);
     }
     ESP_LOGI(TAGTCPCLI, "Socket created");
 
-    //socket timeouts
+    // Set socket timeouts
     struct timeval timeout;
-    timeout.tv_sec = 10;  // 10-second timeout for send/recv operations
-    timeout.tv_usec = 0;  // Microseconds (set to 0)
+    timeout.tv_sec = 10;  
+    timeout.tv_usec = 0;
 
-    //timeout for socket recieve
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-
-    //timeout for socket send
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-
 
     int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
     if (err != 0)
@@ -160,10 +164,12 @@ void tcpclient(void *pvParameters)
         int adc_raw;
         adc_oneshot_read(adc1_handle, TMP_SENSOR_PIN, &adc_raw);  // Read raw ADC value
         float temperature = (adc_raw / 3312.0) * 100.0;           // Convert raw ADC value to temperature
-        snprintf(txbuffer, sizeof(txbuffer), "%.2f\n", temperature);  // Format temperature as string
-        ESP_LOGI(TAGTCPCLI, "Sending temperature: %.2f°C", temperature);
 
-        // Send temperature data to the server
+        // Format MAC and temp into send buffer
+        snprintf(txbuffer, sizeof(txbuffer), "MAC=%s,TEMP=%.2f\n", mac_str, temperature);
+        ESP_LOGI(TAGTCPCLI, "Sending MAC and temperature: %s", txbuffer);
+
+        
         err = send(sock, txbuffer, strlen(txbuffer), 0);
         if (err < 0)
         {
@@ -171,7 +177,7 @@ void tcpclient(void *pvParameters)
             break;
         }
 
-        // Wait for server response ('1' or '0')
+        
         int len = recv(sock, rxbuffer, sizeof(rxbuffer) - 1, 0);  // Use recv for TCP
         if (len < 0)
         {
@@ -179,13 +185,13 @@ void tcpclient(void *pvParameters)
             break;
         }
 
-        rxbuffer[len] = '\0';  // Null-terminate received data
+        rxbuffer[len] = '\0';
         ESP_LOGI(TAGTCPCLI, "Server response: %s", rxbuffer);
 
-        // Check the response
+
         if (rxbuffer[0] == '1')
         {
-            int fan = check_fan(); 
+            int fan = check_fan();
             if (fan == 1)
             {
                 ESP_LOGI(TAGTCPCLI, "Temperature > 50. Fan is already ON.");
@@ -198,7 +204,7 @@ void tcpclient(void *pvParameters)
         }
         else if (rxbuffer[0] == '0')
         {
-            int fan = check_fan(); 
+            int fan = check_fan();
             if (fan == 0)
             {
                 ESP_LOGI(TAGTCPCLI, "Temperature <= 50. Fan is already OFF.");
@@ -207,10 +213,10 @@ void tcpclient(void *pvParameters)
             {
                 ESP_LOGI(TAGTCPCLI, "Temperature <= 50. Turning fan OFF.");
                 fan_off();
-            } 
+            }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1000));  // Delay for 1 second
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
     close(sock);
@@ -234,14 +240,54 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
 
-        // Start the TCP client after getting IP
+        // start tcp after getting data
         ESP_LOGI(TAG, "Starting TCP client...");
         xTaskCreate(tcpclient, "tcp_client", 10096, NULL, 5, NULL);
     }
 }
 
 
-// Initialize Wi-Fi
+void wifi_init_sta(void);
+
+
+// start wifi again with new credentials
+void wifi_reinit_sta(void) {
+    esp_err_t ret;
+
+    ret = esp_wifi_stop();
+    if (ret == ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGW(TAG, "Wi-Fi was not initialized, skipping stop");
+    } else if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Wi-Fi stopped successfully");
+    } else {
+        ESP_LOGE(TAG, "Failed to stop Wi-Fi: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    // Deinitialize Wi-Fi to clean up resources
+    ret = esp_wifi_deinit();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Wi-Fi deinitialized successfully");
+    } else if (ret == ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGW(TAG, "Wi-Fi was not initialized, skipping deinit");
+    } else {
+        ESP_LOGE(TAG, "Failed to deinitialize Wi-Fi: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    // Deinitialize the network interface
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif != NULL) {
+        esp_netif_destroy(netif);  // Destroy the previous network interface to prevent duplicate keys
+        ESP_LOGI(TAG, "Network interface destroyed");
+    }
+
+    //reinitialize Wi-Fi with new credentials
+    wifi_init_sta();
+}
+
+
+
 void wifi_init_sta(void) {
     esp_netif_init();
     wifi_event_group = xEventGroupCreate();
@@ -280,8 +326,8 @@ void ble_app_advertise(void);
 // Function to parse the incoming data
 static int parse_received_data(const char *data) {
     char *token;
-    char buffer[256]; //buffer for parsed data
-    strncpy(buffer, data, sizeof(buffer) - 1);  //save data
+    char buffer[256];
+    strncpy(buffer, data, sizeof(buffer) - 1);  //save into buffer
 
     // Tokenize and assign the SSID
     token = strtok(buffer, ",");
@@ -331,7 +377,8 @@ static int parse_received_data(const char *data) {
     return 0;
 }
 
-// handler for recieving all data
+void tcpclient_list(void *pvParameters);
+
 static int ble_write_handler(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
     char received_data[256];
 
@@ -345,20 +392,92 @@ static int ble_write_handler(uint16_t conn_handle, uint16_t attr_handle, struct 
 
     ESP_LOGI(TAG, "Raw data received: %s", received_data);
 
-    // Parse the received data
-    if (parse_received_data(received_data) != 0) {
-        ESP_LOGE(TAG, "Failed to parse received data");
-        return -1;
+    // Check if the command is "LIST"
+    if (strcmp(received_data, "LIST") == 0) {
+        ESP_LOGI(TAG, "Received LIST command. Sending request to TCP server.");
+        xTaskCreate(tcpclient_list, "tcp_client_list", 10096, NULL, 5, NULL);  // Start the LIST command TCP task
+    } else {
+        // Existing logic for parsing SSID, Password, etc.
+        if (parse_received_data(received_data) != 0) {
+            ESP_LOGE(TAG, "Failed to parse received data");
+            return -1;
+        }
+
+        ESP_LOGI(TAG, "Starting Wi-Fi with received credentials");
+        wifi_reinit_sta();  // Reinitialize Wi-Fi with new credentials
+
+        xTaskCreate(tcpclient, "tcp_client", 10096, NULL, 5, NULL);  // Start the normal TCP client task
     }
-
-    // id good, start wifi and tcp
-    ESP_LOGI(TAG, "Starting Wi-Fi with received credentials");
-    wifi_init_sta();
-
-    xTaskCreate(tcpclient, "tcp_client", 10096, NULL, 5, NULL);
 
     return 0;
 }
+
+
+void tcpclient_list(void *pvParameters) {
+    char rxbuffer[1024];
+    char txbuffer[20];
+
+    int tcpport = atoi(PORT);
+
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_addr.s_addr = inet_addr(IP); // Server IP
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(tcpport);       // Server port
+
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock < 0)
+    {
+        ESP_LOGE(TAGTCPCLI, "Error when creating socket: errno %d", errno);
+        vTaskDelete(NULL);
+    }
+    ESP_LOGI(TAGTCPCLI, "Socket created");
+
+    // timeout
+    struct timeval timeout;
+    timeout.tv_sec = 10;  
+    timeout.tv_usec = 0;
+
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (err != 0)
+    {
+        ESP_LOGE(TAGTCPCLI, "Error when connecting to socket: errno %d", errno);
+        close(sock);
+        vTaskDelete(NULL);
+    }
+    ESP_LOGI(TAGTCPCLI, "Successfully connected");
+    ESP_LOGI(TAGTCPCLI, "Connected to server: %s:%d", IP, tcpport);
+
+    // send LIST to Go
+    snprintf(txbuffer, sizeof(txbuffer), "LIST\n");
+    ESP_LOGI(TAGTCPCLI, "Sending LIST command to the server");
+
+    err = send(sock, txbuffer, strlen(txbuffer), 0);
+    if (err < 0)
+    {
+        ESP_LOGE(TAGTCPCLI, "Error occurred during sending: errno %d", errno);
+        close(sock);
+        vTaskDelete(NULL);
+    }
+
+    int len = recv(sock, rxbuffer, sizeof(rxbuffer) - 1, 0);  // use recv for tcp not recvfrom
+    if (len < 0)
+    {
+        ESP_LOGE(TAGTCPCLI, "Error occurred during receiving: errno %d", errno);
+        close(sock);
+        vTaskDelete(NULL);
+    }
+    rxbuffer[len] = '\0';  
+    ESP_LOGI(TAGTCPCLI, "Received device list: %s", rxbuffer);
+
+
+    close(sock);
+    vTaskDelete(NULL);
+}
+
+
 
 // GATT Services Definition 
 static const struct ble_gatt_svc_def gatt_svcs[] = {
